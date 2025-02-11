@@ -51,7 +51,7 @@ struct file_operations scull_opts = {
 // every scull has a scull_dev struct
 struct scull_dev {
 	void *data;
-	long long current_size;
+	long long size; // indicate where the current EOF is
 	struct cdev chrdev;
 };
 
@@ -73,9 +73,8 @@ int scull_open (struct inode *ip, struct file *fp) {
 	{
 		if(fp->f_flags & O_TRUNC)
 		{
-			kfree(dev->data);
-			dev->data = 0;
-			dev->current_size = 0;
+			//kfree(dev->data);
+			//dev->data = 0;
 		}
 	}
 
@@ -100,7 +99,7 @@ ssize_t scull_read(struct file* fp, char __user *user_data, size_t count, loff_t
 	if(des_addr > QUANTUM_SIZE)
 	{
 		des_count = QUANTUM_SIZE - *f_pos;
-		if(des_count == 0)
+		if(des_count <= 0)
 		{
 			printk(KERN_ALERT "in read() reached EOF\n");
 			return 0;
@@ -126,12 +125,13 @@ fail_out:
 
 ssize_t scull_write(struct file *fp, const char __user *user_data, size_t count, loff_t *f_pos) {
 	struct scull_dev *dev= fp->private_data;
-	loff_t des_addr = *f_pos + count;
+	loff_t des_addr = dev->size + count;
 	size_t des_count = count;
 	int retval;
 
 
 	printk(KERN_ALERT "call scull_write()\n");
+
 	
 	if(dev->data == NULL)	// that means need to allocate memory on data
 	{
@@ -148,7 +148,7 @@ ssize_t scull_write(struct file *fp, const char __user *user_data, size_t count,
 
 	if(des_addr > QUANTUM_SIZE) // that means can not reach the des_addr
 	{
-		des_count = QUANTUM_SIZE - *f_pos;
+		des_count = QUANTUM_SIZE - dev->size;
 		if(des_count == 0) // means has reached the end of file
 		{
 			printk(KERN_ALERT "in write() reached EOF\n");
@@ -156,14 +156,15 @@ ssize_t scull_write(struct file *fp, const char __user *user_data, size_t count,
 		}
 	}
 
-	if(copy_from_user(dev->data + (*f_pos), user_data, des_count))
+	if(copy_from_user(dev->data + (dev->size), user_data, des_count))
 	{
 		printk(KERN_ERR "in write() copy_from_user() failed\n");
 		retval = -EFAULT;
 		goto fail_out;
 	}
 
-	*f_pos += des_count;
+	dev->size += des_count;
+	*f_pos = dev->size;
 	printk(KERN_ALERT "f_pos updated as %lld\n", *f_pos);
 
 	return des_count;
@@ -172,8 +173,42 @@ fail_out:
 	return retval;
 }
 
-loff_t scull_llseek (struct file *fp, loff_t off, int whence) {
-	return 0;
+loff_t scull_llseek (struct file *fp, loff_t offset, int whence) {
+	struct scull_dev *dev = fp->private_data;
+	loff_t new_pos;
+
+	printk(KERN_ALERT "scull_llseek()\n");
+
+    switch(whence)
+    {
+    case SEEK_SET:
+		printk("SEEK_SET newpos %lld\n", offset);
+		new_pos = offset;
+
+        break;
+
+    case SEEK_CUR:
+		printk("SEEK_CUR newpos %lld\n", fp->f_pos + offset);
+		new_pos = fp->f_pos + offset;
+
+        break;
+
+    case SEEK_END:
+		printk("SEEK_END newpos %lld\n", dev->size + offset);
+		new_pos = dev->size + offset;
+
+        break;
+
+    default: /* can't happen */
+        return -EINVAL;
+    }
+    
+	if (new_pos < 0) // 'offset' can be less than 0
+        return -EINVAL;
+    
+	fp->f_pos = new_pos;
+
+    return new_pos;
 }
 
 long scull_ioctl(struct file *fp, unsigned int ioctl_num, unsigned long ioctl_param) {
@@ -199,6 +234,7 @@ int __init scull_init(void)
 	for(i = 0; i < DEV_AMNT; i++)
 	{
 		sculls[i].data = NULL;
+		sculls[i].size = 0;
 	}
 	
 	// start allocating device number
